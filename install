@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2029
+
+OPENWRT=${1:?'No OpenWrt server provided'}
+echo "OPENWRT = ${OPENWRT}"
+
+if ! ssh "${OPENWRT}" 'ls /bin/bash'; then
+  echo "Install Bash first on the OpenWrt target: ${OPENWRT}"
+  echo "ssh ${OPENWRT} 'opkg update && opkg install bash'"
+  exit 1
+fi
+
+scp "${ENV_CONF_FILE}" "${OPENWRT}:/etc/"
+scp "${ENV_INIT_FILE}"  "${OPENWRT}:/etc/init.d/${ENV_PRJ_NAME}"
+ssh "${OPENWRT}" "mkdir -p /usr/share/${ENV_PRJ_NAME}"
+scp "${ENV_SRVC_FILE}"  "${OPENWRT}:/usr/share/${ENV_PRJ_NAME}/"
+
+ssh "${OPENWRT}" "service debounce enable"
+ssh "${OPENWRT}" "service debounce start"

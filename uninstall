@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2029
+
+OPENWRT=${1:?'No OpenWrt server provided'}
+echo "\${OPENWRT} = ${OPENWRT}"
+
+ssh "${OPENWRT}" "service debounce stop"
+ssh "${OPENWRT}" "service debounce disable"
+
+ssh "${OPENWRT}" "rm -f /etc/${ENV_PRJ_NAME}.conf"
+ssh "${OPENWRT}" "rm -f /etc/init.d/${ENV_PRJ_NAME}"
+ssh "${OPENWRT}" "rm -rf /usr/share/${ENV_PRJ_NAME}"

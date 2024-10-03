@@ -1,0 +1,127 @@
+#!/bin/bash
+
+name=${1:?'No first instance name arg provided'}
+cmd=${2:?'No second command arg provided'}
+timeout=${3:?'No third timeout arg provided'}
+ticks=${4:?'No ticks arg provided'}
+logpri=${5:?'No logpri arg provided'}
+read -r -a cmd_array<<<"${cmd}"
+
+[[ ! ${timeout} =~ ^[0-9]+$ ]] && echo "The timeout ${timeout} is NOT an integer number" && exit 1
+[[ ${timeout} -lt 5 ]] && echo "The timeout ${timeout} SHOULD >= 5, but that's your call"
+[[ ! ${ticks} =~ ^[0-9]+$ ]] && echo "The ticks ${ticks} is NOT an integer number" && exit 1
+[[ ${ticks} -gt 5 ]] && echo "The timeout ${ticks} SHOULD <= 5, but that's your call"
+
+BASEDIR=/tmp
+TEMPDIR="$(mktemp -d -p "${BASEDIR}" -t debounce.XXXXXX)"
+FIFO="${TEMPDIR}"/fifo
+TIMER="${TEMPDIR}"/timer
+INST_FILE="${BASEDIR}/debounce_${name}"
+echo "${TEMPDIR}" > "${INST_FILE}"
+echo "${cmd}" > "${TEMPDIR}/cmd"
+PID_FILE="${TEMPDIR}"/pid
+echo $$ > "${PID_FILE}"
+mkfifo "${FIFO}"
+OUT="${TEMPDIR}"/log
+
+declare -A log_priorities
+log_priorities=( 
+  ["trace"]="0"
+  ["debug"]="1"
+  ["info"]="2"
+  ["warning"]="3"
+  ["warn"]="3"
+  ["err"]="4"
+  ["error"]="4"
+  ["fatal"]="5"
+)
+cfg_priority=${log_priorities[${logpri}]}
+[[ -z ${cfg_priority} ]] && echo "Invalid logpri ${logpri}: existing ..." && exit 1
+
+log() {
+  local msg tag priority
+  # shellcheck disable=SC2235
+  ( [[ ${#} -eq 0 ]] || [[ ${LOGOFF} == 'yes' ]] ) && return
+  if [[ ${#} -eq 1 ]]; then
+    msg="${1}" && tag=info &&  priority=2
+  else
+    msg="${2}" && tag="${1}" && priority="${log_priorities[${tag}]}"
+  fi
+  [[ -z ${priority} ]] && tag=info && priority=2 && msg=${1}
+
+  if [[ ${priority} -ge ${cfg_priority} ]]; then
+    printf '%s [%s] %s\n' "$(date +%s)" "${tag}" "${msg}" >> "${OUT}"
+  fi
+}
+
+cleanup() {
+  log "Cleanup called with $*"
+  trap - EXIT
+
+  if [[ -n ${TEMPDIR} ]]; then
+    log "wiping tempdir '${TEMPDIR}' and instance file ${INST_FILE}"
+    rm -rf "${TEMPDIR}"
+    rm -f "${INST_FILE}"
+  fi
+
+  if [[ -n "$1" ]]; then
+    echo "Exiting cleanup with $0 exit code"
+    trap - "$1"
+    kill -"$1" $$
+  fi
+}
+
+trap 'cleanup' EXIT
+trap 'cleanup HUP' HUP
+trap 'cleanup TERM' TERM
+trap 'cleanup INT' INT
+
+log "Started debounce instance for ${name} ..."
+log debug "Fifo file created: ${FIFO}"
+
+FD=0
+while [[ ${FD} -le 254 ]]; do
+  link="/proc/${$}/fd/${FD}"
+  if [[ ! -L "${link}" ]]; then
+    break
+  fi
+  ((++FD))
+done
+exec {FD}<>"${FIFO}"
+
+debounce="-1"
+ticks=1
+while true; do
+  if [[ ${debounce} -eq 0 ]]; then
+    result="$("${cmd_array[@]}" 2>&1)"
+    err_code=$?
+
+    # we might skip this if ticks is higher than 1 and odd when we subtract
+    if [[ ${err_code} -eq 0 ]]; then
+      msg="Debounce timeout: successfully executed command '${cmd_array[*]}' with result [0] - '${result}'"
+      log "${msg}"
+    else
+      msg="Debounce timeout: failed to execute command '${cmd_array[*]}' with result [${err_code}] - '${result}'"
+      log error "${msg}"
+    fi
+    debounce=-1
+  fi
+
+  if read -t "${ticks}" -r line <&"$FD"; then
+    log "Got line: '${line}' when debounce timer was at ${debounce}"
+    if [[ ${line} != "${cmd}" ]]; then
+      log warn "The sent command '${line}' did not match the configuration cmd '${cmd}'"
+    else
+      log "Resetting timer: sent command '${line}' matches the configuration cmd"
+      debounce="$(( timeout + ticks))"
+      log debug "Timer set to ${debounce}"
+    fi
+  else
+    echo "${debounce}" > "${TIMER}"
+    msg="Did not get a line in ${ticks} seconds with debounce timer at ${debounce}"
+    log trace "${msg}"
+  fi
+
+  log trace tick
+  ((--debounce))
+done
